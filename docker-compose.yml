@@ -1,0 +1,101 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - 52181:2181
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - zookeeper
+    ports:
+      - 29092:29092  # Internal Kafka communication
+      - 9092:9092    # External Kafka communication
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: EXTERNAL://kafka:9092,INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  kowl:
+    image: quay.io/cloudhut/kowl:master
+    restart: always
+    environment:
+      KAFKA_BROKERS: kafka:9092
+    ports:
+      - "8091:8080"
+    depends_on:
+      - kafka
+
+  debezium:
+    image: debezium/connect:2.5
+    container_name: debezium
+    depends_on:
+      - kafka
+      - db   # Debezium doit attendre PostgreSQL
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: my_connect_configs
+      OFFSET_STORAGE_TOPIC: my_connect_offsets
+      STATUS_STORAGE_TOPIC: my_connect_statuses
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      DATABASE_HOST: db  # Changement ici : on utilise "db" au lieu de "host.docker.internal"
+      DATABASE_PORT: 5432  # Correction ici : on se connecte sur le port interne du conteneur
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: azer
+      DATABASE_DBNAME: debizium
+      DATABASE_SERVER_NAME: banking-server
+      PLUGIN_NAME: pgoutput
+      SLOT_NAME: debezium_slot
+      PUBLICATION_MODE: filtered
+
+  db:
+    image: postgres:15
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: azer
+      POSTGRES_DB: banking_db
+    ports:
+      - 5433:5432  # Port exposé pour la machine hôte (5433), mais dans Docker, il reste 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data  # Volume pour persister les données
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      retries: 5
+      start_period: 20s
+
+  init-db:
+    image: postgres:15
+    depends_on:
+      - db
+    command: >
+      bash -c "
+      sleep 10 &&
+      PGPASSWORD=azer psql -h db -U postgres -d banking_db -c 'CREATE PUBLICATION debezium_pub FOR ALL TABLES;' &&
+      PGPASSWORD=azer psql -h db -U postgres -d banking_db -c 'SELECT * FROM pg_publication;'
+      PGPASSWORD=azer psql -h db -U postgres -d banking_db -c 'ALTER TABLE product REPLICA IDENTITY FULL;'
+      "
+
+volumes:
+  pgdata: {}

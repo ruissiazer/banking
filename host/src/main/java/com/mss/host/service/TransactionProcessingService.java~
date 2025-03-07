@@ -1,0 +1,44 @@
+package com.mss.host.service;
+
+import com.mss.host.entity.Compte;
+import com.mss.host.kafka.TransactionEvent;
+import com.mss.host.kafka.TransactionProducer;
+import com.mss.host.repository.CompteRepository;
+import jakarta.transaction.Transactional;
+
+import java.util.Optional;
+
+public class TransactionProcessingService {
+    private final CompteRepository compteRepository;
+    private final TransactionProducer transactionProducer;
+
+    public TransactionProcessingService(CompteRepository compteRepository, TransactionProducer transactionProducer) {
+        this.compteRepository = compteRepository;
+        this.transactionProducer = transactionProducer;
+    }
+
+    @Transactional
+    public void processTransaction(TransactionEvent transactionEvent) {
+        Optional<Compte> compteOpt = compteRepository.findByCarteNumCarte(transactionEvent.getNumCarte());
+
+        if (compteOpt.isEmpty()) {
+            transactionProducer.sendTransactionRejected(transactionEvent, "Compte non trouvé");
+            return;
+        }
+
+        Compte compte = compteOpt.get();
+
+        if (transactionEvent.getTypeTransaction().equals("PAIEMENT") || transactionEvent.getTypeTransaction().equals("RETRAIT")) {
+            if (compte.getSolde().compareTo(transactionEvent.getMontant()) < 0) {
+                transactionProducer.sendTransactionRejected(transactionEvent, "Solde insuffisant");
+                return;
+            }
+            compte.setSolde(compte.getSolde().subtract(transactionEvent.getMontant()));
+        } else {
+            compte.setSolde(compte.getSolde().add(transactionEvent.getMontant()));
+        }
+
+        compteRepository.save(compte);
+        transactionProducer.sendTransactionApproved(transactionEvent);
+    }
+}
